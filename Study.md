@@ -1106,6 +1106,7 @@ WHERE state = 'CA' AND points > 1000; -- 如果不是复合索引而是每个单
   - 组合索引顺序按“等值优先 → 范围 → 排序/分组列” 来放置（**最左前缀原则**）。
   - 写频繁的表要权衡索引数量（**索引越多写越慢**）。
   - 使用 `EXPLAIN ANALYZE` 来验证是真慢还是只是估算不准。
+  - `WHERE` 中包含索引列部分尽量不用算式，会导致**索引失效**
 
 - ##### **复合索引只能从最左边开始匹配**。
 
@@ -1131,10 +1132,79 @@ WHERE state = 'CA' AND points > 1000; -- 如果不是复合索引而是每个单
 
   - 如果你经常 `ORDER BY a, b`，那 `(a, b)` 索引会同时帮你加速排序。
   - 如果写 `(b, a)` 就用不上了。
+  - `ORDER BY a, b / a / b / a DESC, b DESC` 但是不能 `ORDER BY a, b DESC`，不能破坏`index`的原有方式，负责引入外部方法会增加性能消耗
 
 - **考虑覆盖索引**
 
   - 如果你常常查询 `SELECT a, b FROM table WHERE a = ?`，那 `(a, b)` 比 `(a)` 好，因为它可以“覆盖索引”，不需要回表。
+
+- **注意索引的维护，删除冗余索引，如果(a, b), 可以建立(b, a)或者(b), 但是不能有(a)，因为a已经包含在(a, b)**
+
+
+
+### 数据库与用户
+
+#### 创建用户
+
+```mysql
+-- CREATE USER test@127.0.0.1 -- 表示test可以从这个ip地址连接数据库
+-- CREATE USER test@localhost -- 主机名
+-- CREATE USER test@codewithmosh.com -- 域名
+-- CREATE USER test@'%.codewithmosh.com' -- 子网域
+CREATE USER test IDENTIFIED BY '1234' -- 表示没有任何限制
+```
+
+
+
+#### 查询与删除
+
+```mysql
+SELECT * FROM mysql.user;
+CREATE USER Bob@codewithmosh.com IDENTIFIED BY '1234';
+DROP USER Bob@codewithmosh.com;
+```
+
+
+
+#### 修改密码
+
+```mysql
+SET PASSWORD FOR test = '1234'; -- 用户的地址之类的也要写清楚，比如Bob@codewithmosh.com
+SET PASSWORD = '1234'; -- 表示给当前用户改密码
+```
+
+
+
+#### 权限管理
+
+```mysql
+-- 1: web/desktop application
+CREATE USER moon_app IDENTIFIED BY '1234';
+
+GRANT SELECT, INSERT, UPDATE, DELETE, EXECUTE -- 给予什么权限
+ON sql_store.* -- 指定数据库
+TO moon_app; -- 指定用户账户，有域名之类的要写清楚
+
+-- 2: admin
+GRANT ALL
+ON *.*
+TO test;
+```
+
+```mysql
+SHOW GRANTS FOR test; -- 查看权限
+SHOW GRANTS; 
+```
+
+```mysql
+GRANT CREATE VIEW
+ON sql_store.*
+TO moon_app;
+
+REVOKE CREATE VIEW -- 用于撤销某个权限
+ON sql_store.*
+FROM moon_app;
+```
 
 
 
