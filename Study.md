@@ -409,6 +409,7 @@ CREATE TABLE table_name (
 CREATE TABLE employees (
     employee_id INT PRIMARY KEY,  -- 设置为主键
     first_name VARCHAR(50) NOT NULL, -- 约束条件，非空
+    -- first_name VARCHAR(50) CHARACTER SET latin1 NOT NULL, -- 修改字符集，如果想要全部都是这个字符集，写在create 															     db 后面即可
     last_name VARCHAR(50) NOT NULL,  -- 约束条件，非空
     department VARCHAR(50) DEFAULT 'General', -- 设置默认值
     INDEX idx_department (department), -- 添加索引
@@ -518,6 +519,11 @@ ALTER TABLE orders
 	  ON DELETE NO ACTION;
 ;
 SHOW CREATE TABLE orders;
+```
+
+```mysql
+ALTER TABLE customer
+ENGINE = InnoDB -- 设置存储引擎，注意每次设置都会重新建表，会影响性能
 ```
 
 
@@ -1012,6 +1018,123 @@ SET TRANSACTION ISOLATION LEVEL name/SERIALIZABLE
 SET SESSION TRANSACTION ISOLATION LEVEL name/SERIALIZABLE -- 当前会话的后续所有事务
 SET GLOBAL TRANSACTION ISOLATION LEVEL name/SERIALIZABLE -- 设置全局
 ```
+
+
+
+### 高校索引
+
+#### 创建索引
+
+```mysql
+EXPLAIN SELECT customer_id FROM customers WHERE state = 'CA'; -- 查看查询过程
+
+CREATE INDEX idx_state ON customers (state); -- 为表中那一列创建索引
+```
+
+1. `EXPLAIN` 的 `rows` 是 **优化器的估算值（估计要读/处理多少行/页）**，不是实际耗时。
+
+- 加索引后优化器可能改用 **索引范围扫描 + 回表** 的计划。它会根据索引统计估算匹配的行数（有时候估算会更保守或更激进），因此 `rows` 数值可能上升。
+- 即使 `rows` 上升，**执行代价 = 估算行数 × 每行代价**。如果走索引能够避免扫描大量不相关页、减少 I/O（尤其是能利用缓存或顺序读取），总体代价仍可能更低。
+- 如果索引导致大量随机回表（每匹配行需要一次随机读），而匹配行很多，则随机 I/O 的开销会很高；这时全表顺序扫描（顺序读，预读效率高）可能更快。优化器会基于统计信息决定。
+
+2. **回表（bookmark lookup）及其成本**
+
+- 读二级索引得到匹配主键后，若结果还需要其他列，就要按主键去聚簇索引读整行。
+
+- 如果很多匹配主键分散在大量不同页上，回表会导致大量随机读（代价高）。
+
+- 如果匹配的行在同一页/相邻页（比如 WHERE 的条件使匹配行有聚簇性），回表的随机页数远小于匹配行数，代价就低。
+
+3. **什么是回表**
+
+- 在 InnoDB 里，**主键索引 = 聚簇索引**，叶子存放整行数据。
+
+- 二级索引（非主键索引）的叶子存放 `(索引列值 + 主键值)`，没有整行。
+
+- 如果你需要取索引里没有的其他列，就要用主键去聚簇索引里再查一次 → 这就是 **回表**。
+
+- 回表 = “二次查找”，可能导致**多次随机 I/O**（尤其当行分散时），所以性能不如覆盖索引。
+
+  
+
+#### 查看索引
+
+```mysql
+SHOW INDEX IN customers; -- 用于查看索引的信息
+ANALYZE TABLE customers; -- 会重新扫描表的统计信息，用于更新统计信息，让信息更准确
+```
+
+
+
+#### 前缀索引
+
+```mysql
+CREATE INDEX idx_lastname ON customers (last_name(20)); -- 这个是CHAR或者VARCHAR，可选择是否需要前缀，但是text和blob一定需要，因为数据量大，至于前缀长度多少，根据表中数据去判断长度多少可以更好的区分，不一定是越大越小越好，要尽可能多的区分，但是又不能太长
+```
+
+
+
+#### 全文索引
+
+```mysql
+CREATE FULLTEXT INDEX idx_title_body ON posts (title, body); -- 创建索引，类似与搜索引擎一样搜索
+SELECT 
+	*,
+    MATCH(title, body) AGAINST ('react redux') -- 用于返回相关性
+FROM posts
+WHERE MATCH(title, body) AGAINST ('react redux') -- 在全文索引用MATCH去匹配，一般默认的自然语言模式
+-- WHERE MATCH(title, body) AGAINST ('react -redux +form' IN BOOLEAN MODE) ,-表示不包含，+表示包含
+```
+
+
+
+#### 复合索引
+
+```mysql
+CREATE INDEX idx_state_points ON customers (state, points); -- 最多可以加16列
+EXPLAIN SELECT 
+	customer_id
+FROM customers
+WHERE state = 'CA' AND points > 1000; -- 如果不是复合索引而是每个单一的话，他只会对前面的state索引，后面的还是正常的扫描，创建复合索引的时候，根据查询的需求排序，等值查询放前面，其余根据缩小范围的效率由高到低
+```
+
+- **索引的选择**
+
+  - **经常用作筛选**且选择性高（很少匹配）→ 建索引。
+  - 查询只返回**少量列**，且这些列都能**由索引提供** → **建覆盖索引**（避免回表）。
+  - 如果筛选会匹配表的**大部分行**（常见阈值 5–20%，视系统而异）→ 全表扫描更可能更快。
+  - 组合索引顺序按“等值优先 → 范围 → 排序/分组列” 来放置（**最左前缀原则**）。
+  - 写频繁的表要权衡索引数量（**索引越多写越慢**）。
+  - 使用 `EXPLAIN ANALYZE` 来验证是真慢还是只是估算不准。
+
+- ##### **复合索引只能从最左边开始匹配**。
+
+索引 `(a, b, c)`, 只能从`a`开始作为查询依据,不可以直接用`b` / `c`去查询
+
+- ##### **选择性高的列放前面**
+
+  - “选择性”指的是这个列能把数据筛选得多精确。
+
+  - 比如有一百万行数据：
+
+    - `gender` 只有 M/F → 选择性差
+    - `email` 唯一 → 选择性高
+
+  - 一般把 `选择性高` 的列放在前面，可以更快缩小范围。
+
+- ##### **等值匹配列优先，范围列往后**
+
+  - 如果你的查询经常是 `WHERE a = ? AND b = ? AND c > ?`
+  - 那么索引顺序应该是 `(a, b, c)`，因为 a 和 b 是等值查询，可以一起用，c 是范围条件，放最后。
+
+- ##### **和 ORDER BY / GROUP BY 配合**
+
+  - 如果你经常 `ORDER BY a, b`，那 `(a, b)` 索引会同时帮你加速排序。
+  - 如果写 `(b, a)` 就用不上了。
+
+- **考虑覆盖索引**
+
+  - 如果你常常查询 `SELECT a, b FROM table WHERE a = ?`，那 `(a, b)` 比 `(a)` 好，因为它可以“覆盖索引”，不需要回表。
 
 
 
